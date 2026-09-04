@@ -7,6 +7,14 @@
 export type AskResponse = {
   answer: string
   model: string
+  detections: Array<{
+    label: string
+    confidence: number | null
+    box: { x1: number; y1: number; x2: number; y2: number }
+  }>
+  visual_evidence: boolean
+  annotated_image: string | null
+  execution_trace: string[]
 }
 
 export async function askSatelliteAgent(input: {

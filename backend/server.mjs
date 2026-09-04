@@ -1,10 +1,11 @@
 ﻿import { createServer } from 'node:http'
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { spawn } from 'node:child_process'
 
 const PORT = Number(process.env.PORT ?? 8787)
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/interactions'
-const DEFAULT_MODEL = process.env.GEMINI_MODEL ?? 'gemini-3.6-flash'
+const pythonScript = resolve(process.cwd(), 'backend', 'satquery_grounding_dino.py')
+const pythonExecutable = process.env.PYTHON ?? resolve(process.cwd(), '.venv', 'Scripts', 'python.exe')
 
 function loadEnvFile() {
   const envPaths = [
@@ -27,8 +28,12 @@ function loadEnvFile() {
   }
 }
 
-function getGeminiApiKey() {
-  return process.env.GEMINI_API_KEY ?? process.env.gemini_api_key
+function parseProcessJson(output) {
+  const lines = output.trim().split(/\r?\n/).reverse()
+  for (const line of lines) {
+    try { return JSON.parse(line) } catch { }
+  }
+  throw new Error('Grounding DINO returned an invalid response.')
 }
 
 function sendJson(response, statusCode, payload) {
@@ -51,43 +56,28 @@ async function readJsonBody(request) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'))
 }
 
-function toInlineImagePart(image) {
-  const [header, base64Data] = String(image.dataUrl ?? '').split(',')
-  const headerMimeType = header?.match(/^data:(.*?);base64$/)?.[1]
-
-  return {
-    type: 'image',
-    data: base64Data ?? '',
-    mime_type: image.type || headerMimeType || 'image/png',
-  }
-}
-
-function buildGeminiRequest({ question, model, images }) {
-  return {
-    model,
-    input: [
-      {
-        type: 'text',
-        text: `Selected analysis route: ${model}. User question: ${question}`,
-      },
-      ...images.map(toInlineImagePart),
-    ],
-    system_instruction: 'You are a satellite image analysis assistant. Answer clearly and mention visual evidence when possible.',
-    generation_config: {
-      temperature: 0.2,
-      max_output_tokens: 700,
-    },
-    store: false,
-  }
-}
-
-function extractGeminiText(data) {
-  return data.steps
-    ?.filter((step) => step.type === 'model_output')
-    .flatMap((step) => step.content ?? [])
-    .map((part) => part.text ?? '')
-    .join('')
-    .trim() || 'No answer returned.'
+function runGrounding(payload) {
+  return new Promise((resolvePromise, reject) => {
+    const python = spawn(pythonExecutable, [pythonScript], { env: process.env })
+    let output = ''
+    let errorOutput = ''
+    python.stdout.on('data', (chunk) => { output += chunk })
+    python.stderr.on('data', (chunk) => { errorOutput += chunk })
+    python.on('error', (error) => reject(new Error(`Could not start the model service: ${error.message}`)))
+    python.on('close', (code) => {
+      if (code !== 0) {
+        try {
+          const modelError = parseProcessJson(output).error
+          reject(new Error(modelError || errorOutput || 'Grounding DINO failed.'))
+        } catch {
+          reject(new Error(errorOutput || 'Grounding DINO failed.'))
+        }
+        return
+      }
+      try { resolvePromise(parseProcessJson(output)) } catch { reject(new Error('Grounding DINO returned an invalid response.')) }
+    })
+    python.stdin.end(JSON.stringify(payload))
+  })
 }
 
 loadEnvFile()
@@ -105,12 +95,6 @@ const server = createServer(async (request, response) => {
     return
   }
 
-  const apiKey = getGeminiApiKey()
-  if (!apiKey) {
-    sendJson(response, 500, { error: 'Missing GEMINI_API_KEY in .env' })
-    return
-  }
-
   try {
     const body = await readJsonBody(request)
     const question = String(body.question ?? '').trim()
@@ -120,29 +104,27 @@ const server = createServer(async (request, response) => {
       sendJson(response, 400, { error: 'Question is required' })
       return
     }
-
-    const geminiResponse = await fetch(GEMINI_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey,
-      },
-      body: JSON.stringify(buildGeminiRequest({ question, model: DEFAULT_MODEL, images })),
-    })
-
-    const data = await geminiResponse.json()
-
-    if (!geminiResponse.ok) {
-      sendJson(response, geminiResponse.status, { error: data.error?.message ?? 'Gemini request failed' })
+    if (images.length === 0) {
+      sendJson(response, 400, { error: 'Upload at least one satellite image first.' })
       return
     }
 
+    const result = await runGrounding({ question, images })
     sendJson(response, 200, {
-      answer: extractGeminiText(data),
-      model: DEFAULT_MODEL,
+      ...result,
+      execution_trace: [
+        'Received satellite image',
+        `Received user query: ${question}`,
+        'Task identified: Grounding',
+        'Model selected: Grounding DINO',
+        `Text prompt: ${result.prompt}`,
+        `${result.detections.length} valid regions detected`,
+        ...(result.visual_evidence ? ['Bounding boxes generated'] : []),
+        ...(result.visual_evidence ? ['Annotated image generated'] : []),
+      ],
     })
   } catch (error) {
-    sendJson(response, 500, { error: error instanceof Error ? error.message : 'Unexpected server error' })
+    sendJson(response, 502, { error: error instanceof Error ? error.message : 'Grounding request failed.' })
   }
 })
 

@@ -22,6 +22,9 @@ function App() {
     answer: '',
     error: '',
     model: '',
+    detections: [],
+    annotatedImage: null,
+    executionTrace: [],
   })
 
   const agentStatus = useMemo(() => {
@@ -36,12 +39,16 @@ function App() {
     event.preventDefault()
     const trimmedQuestion = question.trim()
     if (!trimmedQuestion) return
+    if (uploadedImages.length === 0) {
+      setResponse({ status: 'error', answer: '', error: 'Upload at least one satellite image first.', model: '', detections: [], annotatedImage: null, executionTrace: [] })
+      return
+    }
 
     const nextModel = inferAgentMode(question)
 
     setChosenModel(nextModel)
     window.history.pushState(null, '', modelDestinations[nextModel])
-    setResponse({ status: 'loading', answer: '', error: '', model: '' })
+    setResponse({ status: 'loading', answer: '', error: '', model: '', detections: [], annotatedImage: null, executionTrace: [] })
 
     try {
       const images = await Promise.all(
@@ -57,13 +64,16 @@ function App() {
         images,
       })
 
-      setResponse({ status: 'success', answer: result.answer, error: '', model: result.model })
+      setResponse({ status: 'success', answer: result.answer, error: '', model: result.model, detections: result.detections, annotatedImage: result.annotated_image, executionTrace: result.execution_trace })
     } catch (error) {
       setResponse({
         status: 'error',
         answer: '',
         error: error instanceof Error ? error.message : 'Could not analyze the images.',
         model: '',
+        detections: [],
+        annotatedImage: null,
+        executionTrace: [],
       })
     }
   }
@@ -74,7 +84,7 @@ function App() {
     setQuestion('')
     setChosenModel('auto')
     setUploadedImages([])
-    setResponse({ status: 'idle', answer: '', error: '', model: '' })
+    setResponse({ status: 'idle', answer: '', error: '', model: '', detections: [], annotatedImage: null, executionTrace: [] })
     window.history.pushState(null, '', '/')
   }
 
@@ -136,7 +146,7 @@ function App() {
           <StepHeader number="3" title="AI Response" />
           <div className="response-grid">
             <AnswerPanel response={response} />
-            <EvidencePanel />
+            <EvidencePanel response={response} />
           </div>
         </section>
       </section>
